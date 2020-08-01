@@ -123,7 +123,7 @@ namespace SimpleTCP
             _listener.ReceiveTimeout = ConnectionTimeout * 1000;
             _listener.SendTimeout = ConnectionTimeout * 1000;
             _listener.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-            SetSocketKeepAliveValues(ConnectionTimeout * 1000, 1000);
+            SetSocketKeepAliveValues(_listener, ConnectionTimeout * 1000);
             _listener.Bind(new IPEndPoint(IPAddress, Port));
             _listener.Listen(0);
             IsStarted = true;
@@ -148,6 +148,17 @@ namespace SimpleTCP
         }
 
         /// <summary>
+        /// Kick All Innactive Client from the server
+        /// </summary>
+        public void KickInactivity()
+        {
+            foreach (SocketConnection client in ConnectedClients.ToArray())
+                if (!IsClientConnected(client))
+                    Kick(client.connection);
+        }
+
+
+        /// <summary>
         /// Kick Client IP from the server
         /// </summary>
         /// <param name="ip">IP Address String</param>
@@ -167,7 +178,10 @@ namespace SimpleTCP
             if (client == null) return;
             if (!client.Connected) return;
             if (ConnectedClients.SingleOrDefault(x => x.connection == client) != null)
+            {
                 client.Disconnect(false);
+                NotifyClientDisconnected(client);
+            }
         }
 
         #endregion
@@ -201,11 +215,7 @@ namespace SimpleTCP
         {
             if (string.IsNullOrEmpty(data)) { return; }
             // Encode Data
-            string base64 = Convert.ToBase64String(_encoder.GetBytes(data));
-            if (data.LastOrDefault() != LineDelimiter)
-                Send(ip, StringEncoder.GetBytes(base64 + _encoder.GetString(new byte[] { LineDelimiter })));
-            else
-                Send(ip, StringEncoder.GetBytes(base64));
+            Send(ip, StringEncoder.GetBytes(Convert.ToBase64String(_encoder.GetBytes(data))));
         }
 
         /// <summary>
@@ -288,6 +298,10 @@ namespace SimpleTCP
                 // Add new Client
                 if (handler != null)
                 {
+                    // Set Keep Live
+                    handler.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, 1);
+                    SetSocketKeepAliveValues(handler, 20 * 1000);
+                    /// Notify
                     NotifyClientConnected(handler);
                 }
 
@@ -380,22 +394,32 @@ namespace SimpleTCP
         internal bool IsSocketConnected(Socket client)
         {
             if (client == null) return false;
-            if (!client.Connected) return false;
-            try { return !(client.Poll(1, SelectMode.SelectRead) && client.Available == 0); }
-            catch (SocketException) { return false; }
+            try { return !((client.Poll(1000, SelectMode.SelectRead) && (client.Available == 0)) || !client.Connected); }
+            catch { return false; }
         }
 
-        internal void SetSocketKeepAliveValues(int KeepAliveTime, int KeepAliveInterval)
+        internal bool IsClientConnected(SocketConnection client)
         {
-            int size = Marshal.SizeOf(new uint());
-            byte[] inOptionValues = new byte[size * 3]; // 4 * 3 = 12
-            bool OnOff = true;
+            Socket socket = client.connection;
+            try
+            {
+                socket.ReceiveTimeout = 15 * 1000; // Set 15seg Receive Timeout
+                // Send Ping
+                Send(socket, StringEncoder.GetBytes(Convert.ToBase64String(_encoder.GetBytes("ping"))));
+                int bytesRead = socket.Receive(new byte[1], SocketFlags.Peek); // Receive Pong
+                if (bytesRead == 0) return false;
+            } catch { return false; }
+            return true;
+        }
 
-            BitConverter.GetBytes((uint)(OnOff ? 1 : 0)).CopyTo(inOptionValues, 0);
-            BitConverter.GetBytes((uint)KeepAliveTime).CopyTo(inOptionValues, size);
-            BitConverter.GetBytes((uint)KeepAliveInterval).CopyTo(inOptionValues, size * 2);
-
-            _listener.IOControl(IOControlCode.KeepAliveValues, inOptionValues, null);
+        internal void SetSocketKeepAliveValues(Socket socket, int KeepAliveInterval)
+        {
+            int size = sizeof(UInt32);
+            byte[] inArray = new byte[size * 3];  // 4 * 3 = 12
+            Array.Copy(BitConverter.GetBytes(1), 0, inArray, 0, size);
+            Array.Copy(BitConverter.GetBytes(KeepAliveInterval), 0, inArray, size, size);
+            Array.Copy(BitConverter.GetBytes(1000), 0, inArray, size * 2, size);
+            socket.IOControl(IOControlCode.KeepAliveValues, inArray, null);
         }
 
         internal bool IsImage(string str)
@@ -466,6 +490,10 @@ namespace SimpleTCP
 
         internal void NotifyDelimiterMessageRx(Socket client, byte[] msg)
         {
+            // Detect Ping Command
+            if (StringEncoder.GetString(Convert.FromBase64String(StringEncoder.GetString(msg))).Equals("pong"))
+                return;
+
             if (DelimiterDataReceived != null)
             {
                 DelimiterDataReceived(this, new Message(msg,
@@ -477,10 +505,15 @@ namespace SimpleTCP
 
         internal void NotifyClientConnected(Socket newClient)
         {
-            // Extract Mac Address
-            byte[] buffer = new byte[17];
-            newClient.Receive(buffer, 0, buffer.Length, 0);
-            string message = Encoding.UTF8.GetString(buffer);
+            string message;
+            try
+            {
+                // Extract Mac Address
+                byte[] buffer = new byte[17];
+                newClient.Receive(buffer, 0, buffer.Length, 0);
+                message = Encoding.UTF8.GetString(buffer);
+            }
+            catch { return; }
 
             SocketConnection connected = new SocketConnection() { connection = newClient, macAddress = message };
             _connectedClients.Add(connected); // Add new Client
@@ -493,11 +526,15 @@ namespace SimpleTCP
             if (disconnectedClient == null) return;
             // Remove disconnect Client
             SocketConnection client = _connectedClients.SingleOrDefault(x => x.connection == disconnectedClient);
-            if(client !=null)
+            if(client != null)
+            {
                 _connectedClients.Remove(client);
-            // Notify
-            if (ClientDisconnected != null)
-                ClientDisconnected(this, client);
+                // Notify
+                if (ClientDisconnected != null)
+                    ClientDisconnected(this, client);
+                try { client.connection.Shutdown(SocketShutdown.Both); client.connection.Close(); }
+                catch { }
+            }
         }
 
         #endregion

@@ -4,7 +4,7 @@
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
-    <ProjectGuid>{EA959248-190E-4A94-86E0-30B16BBF2A14}</ProjectGuid>
+    <ProjectGuid>{C9C99F87-E188-49D2-A323-09FE79F39F8D}</ProjectGuid>
     <OutputType>Library</OutputType>
     <AppDesignerFolder>Properties</AppDesignerFolder>
     <RootNamespace>SimpleTCP</RootNamespace>

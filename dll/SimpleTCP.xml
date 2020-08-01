@@ -245,6 +245,11 @@
             Stop Server
             </summary>
         </member>
+        <member name="M:SimpleTCP.SimpleTcpServer.KickInactivity">
+            <summary>
+            Kick All Innactive Client from the server
+            </summary>
+        </member>
         <member name="M:SimpleTCP.SimpleTcpServer.Kick(System.String)">
             <summary>
             Kick Client IP from the server

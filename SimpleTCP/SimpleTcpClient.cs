@@ -89,19 +89,29 @@ namespace SimpleTCP
 			sw.Start();
 			while (sw.Elapsed < timeOut)
 			{
-				try { _client.Connect(hostNameOrIpAddress, port); } catch { }
+				try { _client.Connect(hostNameOrIpAddress, port); } 
+				catch { }
 				if (IsSocketConnected(_client)) break;
 				Thread.Sleep(500);
 			}
 			if (sw.Elapsed >= timeOut)
 			{
-				_client = null; return;
+				_client = null; throw new SocketException();
 			}
-			// Send Mac
-			_client.Send(Encoding.UTF8.GetBytes(GetMacAddress()));
-
-			// Start Receive
-			StartRxThread();
+			if (_client == null)
+				throw new SocketException();
+            try
+			{
+				// Send Mac
+				sendDone.WaitOne();  // Wait until all data is sending before continuing. 
+				_client.Send(Encoding.UTF8.GetBytes(GetMacAddress()));
+				sendDone.Set();  // Signal the main thread to continue.
+				// Start Receive
+				StartRxThread();
+			} catch (Exception)
+			{
+				throw new SocketException();
+			}
 		}
 
 		/// <summary>
@@ -119,7 +129,8 @@ namespace SimpleTCP
 				_client.Close(); // Close Objet
 			}
 			catch (SocketException) { }
-			_client.Dispose();
+			if (_client != null)
+				_client.Dispose();
 			_client = null; // Reset Object
 		}
 
@@ -397,6 +408,15 @@ namespace SimpleTCP
 
 		internal void NotifyDelimiterMessage(Socket client, byte[] msg)
 		{
+            // Detect Ping Command
+            if (StringEncoder.GetString(Convert.FromBase64String(StringEncoder.GetString(msg))).Equals("ping"))
+            {
+				// Send Pong
+				WriteLine("pong");
+				return;
+            }
+
+			// Check Notify
 			if (ClientDataReceived != null)
 				ClientDataReceived(this, new Message(msg, new SocketConnection() { connection = client, macAddress = string.Empty }, StringEncoder, Delimiter, Commandlimiter));
 		}
