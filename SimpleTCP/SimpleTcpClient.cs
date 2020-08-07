@@ -41,8 +41,9 @@ namespace SimpleTCP
 		/// </summary>
 		public event EventHandler<Socket> ClientDisconnected;
 
-		// Thread signal.  
+		// Thread signal.
 		private ManualResetEvent sendDone = new ManualResetEvent(true);
+		private ManualResetEvent sendRetryDone = new ManualResetEvent(true);
 
 		internal bool QueueStop { get; set; }
 		internal int ReadLoopIntervalMs { get; set; }
@@ -75,13 +76,14 @@ namespace SimpleTCP
 		/// <returns>SimpleTCPClient</returns>
 		public void Connect(string hostNameOrIpAddress, int port, int timeout)
 		{
+			if (IsSocketConnected(_client)) Disconnect();
 			// Connect
 			QueueStop = false;
-			_client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-			_client.ReceiveTimeout = timeout * 1000;
-			_client.SendTimeout = timeout * 1000;
-			_client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-			SetSocketKeepAliveValues(timeout * 1000, 1000);
+			Socket client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+			client.ReceiveTimeout = timeout * 1000;
+			client.SendTimeout = timeout * 1000;
+			client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+			SetSocketKeepAliveValues(client, timeout * 1000, 1000);
 
 			// Try to connect.
 			Stopwatch sw = new Stopwatch();
@@ -89,29 +91,31 @@ namespace SimpleTCP
 			sw.Start();
 			while (sw.Elapsed < timeOut)
 			{
-				try { _client.Connect(hostNameOrIpAddress, port); } 
+				if (IsSocketConnected(_client)) throw new StopConnection();
+				try { client.Connect(hostNameOrIpAddress, port); }
+                catch (NullReferenceException) { throw new StopConnection(); }
 				catch { }
-				if (IsSocketConnected(_client)) break;
+				if (IsSocketConnected(client)) break;
 				Thread.Sleep(500);
 			}
-			if (sw.Elapsed >= timeOut)
-			{
-				_client = null; throw new SocketException();
-			}
-			if (_client == null)
-				throw new SocketException();
+			if (IsSocketConnected(_client)) throw new StopConnection();
+			if (sw.Elapsed >= timeOut) throw new SocketException();
+			if (!IsSocketConnected(client)) throw new SocketException();
             try
-			{
-				// Send Mac
-				sendDone.WaitOne();  // Wait until all data is sending before continuing. 
-				_client.Send(Encoding.UTF8.GetBytes(GetMacAddress()));
-				sendDone.Set();  // Signal the main thread to continue.
-				// Start Receive
-				StartRxThread();
-			} catch (Exception)
-			{
-				throw new SocketException();
-			}
+            {
+                // Send Mac
+                sendDone.WaitOne();  // Wait until all data is sending before continuing. 
+                client.Send(Encoding.UTF8.GetBytes(GetMacAddress()));
+                sendDone.Set();  // Signal the main thread to continue.
+                _client = client; // Set Connected Client
+                                  // Start Receive
+                StartRxThread();
+            }
+            catch (Exception)
+            {
+                throw new SocketException();
+            }
+			Thread.Sleep(50);
 		}
 
 		/// <summary>
@@ -126,12 +130,13 @@ namespace SimpleTCP
 			{
 				_client.Disconnect(false); // Disconnect Client
 				_client.Shutdown(SocketShutdown.Both); // Shutdown Connection
-				_client.Close(); // Close Objet
+				_client.Close(); // Close Object
 			}
 			catch (SocketException) { }
 			if (_client != null)
 				_client.Dispose();
 			_client = null; // Reset Object
+			Thread.Sleep(250);
 		}
 
 		// Receive Data and Detect Disconnect Client
@@ -288,6 +293,7 @@ namespace SimpleTCP
 			Message mReply = null;
 			if (_client == null) return mReply;
 			if (!IsSocketConnected(_client)) return mReply;
+			sendRetryDone.WaitOne();  // Wait until all data is sending before continuing. 
 			this.ClientDataReceived += (s, m) => { mReply = m; };
 			WriteLine(data);
 
@@ -298,6 +304,7 @@ namespace SimpleTCP
 				Thread.Sleep(10);
 
 			this.ClientDataReceived -= (s, m) => { mReply = m; };
+			sendRetryDone.Set(); // Signal the main thread to continue. 
 			return mReply;
 		}
 
@@ -348,7 +355,7 @@ namespace SimpleTCP
 			return true;
 		}
 
-		internal void SetSocketKeepAliveValues(int KeepAliveTime, int KeepAliveInterval)
+		internal void SetSocketKeepAliveValues(Socket client, int KeepAliveTime, int KeepAliveInterval)
 		{
 			int size = Marshal.SizeOf(new uint());
 			byte[] inOptionValues = new byte[size * 3]; // 4 * 3 = 12
@@ -358,7 +365,7 @@ namespace SimpleTCP
 			BitConverter.GetBytes((uint)KeepAliveTime).CopyTo(inOptionValues, size);
 			BitConverter.GetBytes((uint)KeepAliveInterval).CopyTo(inOptionValues, size * 2);
 
-			_client.IOControl(IOControlCode.KeepAliveValues, inOptionValues, null);
+			client.IOControl(IOControlCode.KeepAliveValues, inOptionValues, null);
 		}
 
 		/// <summary>
@@ -401,6 +408,7 @@ namespace SimpleTCP
 
 		internal void NotifyClientDisconnected(Socket disconnectedClient)
 		{
+			if (disconnectedClient == null) { return; }
 			Disconnect();
 			if (ClientDisconnected != null)
 				ClientDisconnected(this, disconnectedClient);
@@ -408,14 +416,6 @@ namespace SimpleTCP
 
 		internal void NotifyDelimiterMessage(Socket client, byte[] msg)
 		{
-            // Detect Ping Command
-            if (StringEncoder.GetString(Convert.FromBase64String(StringEncoder.GetString(msg))).Equals("ping"))
-            {
-				// Send Pong
-				WriteLine("pong");
-				return;
-            }
-
 			// Check Notify
 			if (ClientDataReceived != null)
 				ClientDataReceived(this, new Message(msg, new SocketConnection() { connection = client, macAddress = string.Empty }, StringEncoder, Delimiter, Commandlimiter));
@@ -424,6 +424,7 @@ namespace SimpleTCP
         #endregion
 
         #region IDisposable Support
+
         private bool disposedValue = false; // To detect redundant calls
 
 		/// <summary>
@@ -466,6 +467,13 @@ namespace SimpleTCP
 			// TODO: uncomment the following line if the finalizer is overridden above.
 			// GC.SuppressFinalize(this);
 		}
+
 		#endregion
 	}
+
+
+	public class StopConnection : Exception
+    {
+
+    }
 }

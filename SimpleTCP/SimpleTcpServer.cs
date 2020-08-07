@@ -42,7 +42,7 @@ namespace SimpleTCP
 		/// </summary>
         public event EventHandler<Message> ImageReceived;
 
-        // Thread signal.  
+        // Thread signal.
         private ManualResetEvent acceptDone = new ManualResetEvent(false);
 
         internal bool QueueStop { get; set; }
@@ -139,7 +139,8 @@ namespace SimpleTCP
             QueueStop = true; // Stop Accept Clients
             if (_listener != null)
             {
-                foreach (SocketConnection client in ConnectedClients.ToArray())
+                List<SocketConnection> connected = ConnectedClients.ToList();
+                foreach (SocketConnection client in connected)
                     Kick(client.connection); // Kick all Users
                 _listener.Close(); // Close Connection
             }
@@ -152,7 +153,8 @@ namespace SimpleTCP
         /// </summary>
         public void KickInactivity()
         {
-            foreach (SocketConnection client in ConnectedClients.ToArray())
+            List<SocketConnection> connected = ConnectedClients.ToList();
+            foreach (SocketConnection client in connected)
                 if (!IsClientConnected(client))
                     Kick(client.connection);
         }
@@ -162,10 +164,11 @@ namespace SimpleTCP
         /// Kick Client IP from the server
         /// </summary>
         /// <param name="ip">IP Address String</param>
-        public void Kick(string ip)
+        public void Kick(string mac)
         {
-            foreach (SocketConnection client in ConnectedClients.ToArray())
-                if (((IPEndPoint)client.connection.RemoteEndPoint).Address.ToString() == ip)
+            List<SocketConnection> connected = ConnectedClients.ToList();
+            foreach (SocketConnection client in connected)
+                if(client.macAddress.Equals(mac))
                     Kick(client.connection);
         }
 
@@ -177,11 +180,8 @@ namespace SimpleTCP
         {
             if (client == null) return;
             if (!client.Connected) return;
-            if (ConnectedClients.SingleOrDefault(x => x.connection == client) != null)
-            {
-                client.Disconnect(false);
-                NotifyClientDisconnected(client);
-            }
+            client.Disconnect(false);
+            NotifyClientDisconnected(client);
         }
 
         #endregion
@@ -199,11 +199,15 @@ namespace SimpleTCP
             client.Send(recBuf, 0, recBuf.Length, SocketFlags.None);
         }
 
-        private void Send(string ip, byte[] data)
+        private void Send(string mac, byte[] data)
         {
-            foreach (SocketConnection client in ConnectedClients.ToArray())
-                if (((IPEndPoint)client.connection.RemoteEndPoint).Address.ToString() == ip)
-                    Send(client.connection, data); // Send to ip
+            try
+            {
+                SocketConnection client = ConnectedClients.SingleOrDefault(x => x.macAddress.Equals(mac));
+                if (client == null) return;
+                Send(client.connection, data); // Send to ip
+            }
+            catch { }
         }
 
         /// <summary>
@@ -211,11 +215,11 @@ namespace SimpleTCP
         /// </summary>
         /// <param name="ip">IP Address String</param>
         /// <param name="data">Text Data</param>
-        public void Send(string ip, string data)
+        public void Send(string mac, string data)
         {
             if (string.IsNullOrEmpty(data)) { return; }
             // Encode Data
-            Send(ip, StringEncoder.GetBytes(Convert.ToBase64String(_encoder.GetBytes(data))));
+            Send(mac, StringEncoder.GetBytes(Convert.ToBase64String(_encoder.GetBytes(data))));
         }
 
         /// <summary>
@@ -224,13 +228,13 @@ namespace SimpleTCP
         /// <param name="ip">IP Address String</param>
 		/// <param name="cmd">Command</param>
 		/// <param name="args">Data with Command</param>
-        public void SendCommand(string ip, string cmd, string[] args = null)
+        public void SendCommand(string mac, string cmd, string[] args = null)
         {
             StringBuilder request = new StringBuilder();
             if (args != null)
                 for (int i = 0; i < args.Length; i++)
                     request.Append(Commandlimiter.ToString() + args[i]);
-            Send(ip, (cmd == string.Empty || cmd.Equals("")) ? request.ToString().Substring(1, request.Length) : cmd + request);
+            Send(mac, (cmd == string.Empty || cmd.Equals("")) ? request.ToString().Substring(1, request.Length) : cmd + request);
         }
 
         /// <summary>
@@ -240,7 +244,8 @@ namespace SimpleTCP
         // Broadcast all Clients
         public void Broadcast(string data)
         {
-            foreach (SocketConnection client in ConnectedClients.ToArray())
+            List<SocketConnection> connected = ConnectedClients.ToList();
+            foreach (SocketConnection client in connected)
             {
                 if (string.IsNullOrEmpty(data)) { return; }
                 // Encode Data
@@ -295,6 +300,14 @@ namespace SimpleTCP
                 // Get the socket that handles the client request.
                 handler = ((Socket)ar.AsyncState).EndAccept(ar);
 
+                // Check if Exists this user connected
+                try
+                {
+                    SocketConnection client = _connectedClients.SingleOrDefault(x => x.connection == handler);
+                    if (client != null) Kick(client.connection);
+                }
+                catch { }
+
                 // Add new Client
                 if (handler != null)
                 {
@@ -312,6 +325,7 @@ namespace SimpleTCP
             }
             catch (ObjectDisposedException) { return; }
             catch (SocketException) { NotifyClientDisconnected(handler); return; }
+            catch (Exception) { NotifyClientDisconnected(handler); return; }
         }
 
         private void ReadCallback(IAsyncResult ar)
@@ -400,15 +414,8 @@ namespace SimpleTCP
 
         internal bool IsClientConnected(SocketConnection client)
         {
-            Socket socket = client.connection;
-            try
-            {
-                socket.ReceiveTimeout = 15 * 1000; // Set 15seg Receive Timeout
-                // Send Ping
-                Send(socket, StringEncoder.GetBytes(Convert.ToBase64String(_encoder.GetBytes("ping"))));
-                int bytesRead = socket.Receive(new byte[1], SocketFlags.Peek); // Receive Pong
-                if (bytesRead == 0) return false;
-            } catch { return false; }
+            if ((client.lastPing + 120) < getTimeNow()) return false;
+            if (!IsSocketConnected(client.connection)) return false;
             return true;
         }
 
@@ -472,6 +479,10 @@ namespace SimpleTCP
 
         [DllImport("iphlpapi.dll", ExactSpelling = true)]
         internal static extern int SendARP(uint destIP, uint srcIP, byte[] macAddress, ref uint macAddressLength);
+        public static long getTimeNow()
+        {
+            return long.Parse(DateTime.Now.ToFileTime().ToString().Substring(0, 11));
+        }
 
         #endregion
 
@@ -490,9 +501,16 @@ namespace SimpleTCP
 
         internal void NotifyDelimiterMessageRx(Socket client, byte[] msg)
         {
-            // Detect Ping Command
-            if (StringEncoder.GetString(Convert.FromBase64String(StringEncoder.GetString(msg))).Equals("pong"))
-                return;
+            try
+            {
+                // Detect Ping Command
+                if (StringEncoder.GetString(Convert.FromBase64String(StringEncoder.GetString(msg))).Equals("ping")) {
+                    SocketConnection cnx = _connectedClients.SingleOrDefault(x => x.connection == client);
+                    cnx.lastPing = getTimeNow();
+                    return;
+                }
+            }
+            catch { return; }
 
             if (DelimiterDataReceived != null)
             {
@@ -515,7 +533,7 @@ namespace SimpleTCP
             }
             catch { return; }
 
-            SocketConnection connected = new SocketConnection() { connection = newClient, macAddress = message };
+            SocketConnection connected = new SocketConnection() { connection = newClient, lastPing = getTimeNow(), macAddress = message };
             _connectedClients.Add(connected); // Add new Client
             if (ClientConnected != null)
                 ClientConnected(this, connected);

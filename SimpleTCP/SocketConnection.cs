@@ -13,6 +13,10 @@ namespace SimpleTCP
         /// </summary>
         public Socket connection { get; set; }
         /// <summary>
+        /// Last 
+        /// </summary>
+        public long lastPing { get; set; }
+        /// <summary>
         /// MacAddress of Client
         /// </summary>
         public string macAddress { get; set; }
