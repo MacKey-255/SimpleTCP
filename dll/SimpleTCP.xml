@@ -315,6 +315,11 @@
             Socket Connection
             </summary>
         </member>
+        <member name="P:SimpleTCP.SocketConnection.lastPing">
+            <summary>
+            Last 
+            </summary>
+        </member>
         <member name="P:SimpleTCP.SocketConnection.macAddress">
             <summary>
             MacAddress of Client

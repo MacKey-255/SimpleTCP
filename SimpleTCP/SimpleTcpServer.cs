@@ -335,6 +335,14 @@ namespace SimpleTCP
             // Retrieve the state object and the handler socket from the asynchronous state object.  
             Message message = (Message) ar.AsyncState;
             Socket handler = message.Client.connection;
+            message.Client.lastPing = getTimeNow();
+            // Update Last Ping
+            try
+            {
+                SocketConnection cnx = _connectedClients.SingleOrDefault(x => x.macAddress.Equals(message.Client.macAddress));
+                cnx.lastPing = getTimeNow();
+            }
+            catch { }
 
             // Detect Disconnect Client
             if (handler == null) { NotifyClientDisconnected(handler); return; }
@@ -414,7 +422,7 @@ namespace SimpleTCP
 
         internal bool IsClientConnected(SocketConnection client)
         {
-            if ((client.lastPing + 120) < getTimeNow()) return false;
+            if ((client.lastPing + ConnectionTimeout) < getTimeNow()) return false;
             if (!IsSocketConnected(client.connection)) return false;
             return true;
         }
@@ -503,8 +511,9 @@ namespace SimpleTCP
         {
             try
             {
+                byte[] decodebase64 = Convert.FromBase64String(StringEncoder.GetString(msg));
                 // Detect Ping Command
-                if (StringEncoder.GetString(Convert.FromBase64String(StringEncoder.GetString(msg))).Equals("ping")) {
+                if (StringEncoder.GetString(decodebase64).Equals("ping")) {
                     SocketConnection cnx = _connectedClients.SingleOrDefault(x => x.connection == client);
                     cnx.lastPing = getTimeNow();
                     return;

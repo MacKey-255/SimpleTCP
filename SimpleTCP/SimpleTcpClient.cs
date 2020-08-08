@@ -241,9 +241,7 @@ namespace SimpleTCP
 				}
 				Thread.Sleep(250);
 			}
-			catch (System.IO.IOException) { NotifyClientDisconnected(_client);  }
-			catch (InvalidOperationException) { NotifyClientDisconnected(_client); }
-			catch (SocketException) { NotifyClientDisconnected(_client); }
+			catch { NotifyClientDisconnected(_client);  }
 			sendDone.Set(); // Signal the main thread to continue.  
 		}
 
